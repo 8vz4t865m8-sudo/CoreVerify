@@ -1,0 +1,152 @@
+name: build-coreverify
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  # ═══════════════════════════════════════════════════════════
+  #  Job 1：纯静态检查（Linux，秒级）
+  #
+  #  这一步不需要 Xcode，跑得飞快，
+  #  能在等 macOS runner 排队之前就把低级错误挡住。
+  # ═══════════════════════════════════════════════════════════
+  static:
+    name: 静态检查（Linux）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装 clang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm
+
+      # ── 工程一致性 / 代码安全 / 坐标合理性 / T3 凭据核对 ──
+      - name: preflight（57 项断言）
+        run: |
+          set -e
+          python3 checks/preflight.py
+
+      # ── Objective-C 语法检查 ──
+      #
+      #  ★ 核心一步：用 -target arm64-apple-ios14.0 + 最小 stub 头，
+      #    在 Linux 上就能抓出 漏分号 / 括号不配对 / @end 缺失 /
+      #    方法签名不匹配 / 类型未定义 这类真实编译错误。
+      #    这些正是 macOS 上 make 最常见的失败原因。
+      - name: Objective-C 语法检查
+        run: |
+          set -e
+          chmod +x checks/syntax_check.sh
+          ./checks/syntax_check.sh
+
+  # ═══════════════════════════════════════════════════════════
+  #  Job 2：真机构建（macOS + Xcode）
+  # ═══════════════════════════════════════════════════════════
+  build:
+    name: 构建 dylib（macOS）
+    runs-on: macos-14
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      - name: 显示工具链
+        run: |
+          xcodebuild -version
+          xcrun -sdk iphoneos --show-sdk-version
+          xcrun -sdk iphoneos --show-sdk-path
+
+      # ── 构建 ──
+      - name: make（双切片 arm64 + arm64e）
+        run: make ARCHS="arm64 arm64e"
+
+      - name: 列出产物
+        run: ls -la CoreVerify.v1.dylib
+
+      # ── 产物验证（postflight 的完整版，含 lipo/otool/nm）──
+      - name: postflight（产物验证）
+        run: |
+          set -e
+          python3 checks/postflight.py CoreVerify.v1.dylib
+
+      # ── 关键断言（postflight 已经覆盖，这里再显式写一遍便于排错）──
+      - name: ★ 架构断言
+        run: |
+          set -e
+          lipo -info CoreVerify.v1.dylib
+          ARCHS=$(lipo -archs CoreVerify.v1.dylib)
+          echo "$ARCHS"
+          echo "$ARCHS" | grep -q "arm64"  || { echo "❌ 缺 arm64 切片"; exit 1; }
+          echo "$ARCHS" | grep -q "arm64e" || { echo "❌ 缺 arm64e 切片"; exit 1; }
+          echo "✅ 双切片 arm64 + arm64e"
+
+      - name: ★ install name 断言
+        run: |
+          set -e
+          otool -D CoreVerify.v1.dylib
+          otool -D CoreVerify.v1.dylib | grep -q "@executable_path/CoreVerify.v1.dylib" \
+            || { echo "❌ install name 不对，注入后 dyld 找不到"; exit 1; }
+          echo "✅ @executable_path/CoreVerify.v1.dylib"
+
+      - name: ★ 依赖断言
+        run: |
+          set -e
+          otool -L CoreVerify.v1.dylib
+          LIBS=$(otool -L CoreVerify.v1.dylib | tail -n +2 | awk '{print $1}')
+          for want in Foundation UIKit Security; do
+            echo "$LIBS" | grep -q "$want.framework" \
+              || { echo "❌ 缺 $want"; exit 1; }
+          done
+          echo "✅ Foundation / UIKit / Security 齐全"
+
+      - name: ★ constructor 断言
+        run: |
+          set -e
+          nm -gU CoreVerify.v1.dylib | grep -q "CoreVerifyEntry" \
+            || { echo "❌ 缺 CoreVerifyEntry —— 注入后不会自动启动"; exit 1; }
+          echo "✅ constructor CoreVerifyEntry 已导出"
+
+      - name: ★★★ 反向断言（不能有测试版后门痕迹）
+        run: |
+          set -e
+          S=$(strings -a CoreVerify.v1.dylib)
+          for bad in "2099-12-31" "t.me/cheatrev" "CoreHomeLinkTarget" \
+                     "CoreHomeRewriteControls" "1970-01-01 00:00:01"; do
+            if echo "$S" | grep -q "$bad"; then
+              echo "❌ 出现测试版痕迹: $bad"
+              exit 1
+            fi
+          done
+          echo "✅ 无 2099 硬编码 / 无 Telegram 跳转 / 无按钮劫持残留"
+
+      # ── 上传产物 ──
+      - name: 上传 dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoreVerify.v1.dylib
+          path: CoreVerify.v1.dylib
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 生成校验信息
+        run: |
+          echo "## CoreVerify.v1.dylib" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -la CoreVerify.v1.dylib >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          lipo -info CoreVerify.v1.dylib >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          otool -D CoreVerify.v1.dylib >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          shasum -a 256 CoreVerify.v1.dylib >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
