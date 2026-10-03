@@ -633,15 +633,6 @@ FOUNDATION_EXPORT NSString * const NSURLErrorDomain;
 - (NSString *)UUIDString;
 @end
 
-@class UIDevice;
-@interface UIDevice : NSObject
-+ (instancetype)currentDevice;
-@property (nonatomic, readonly) NSUUID *identifierForVendor;
-@property (nonatomic, readonly) NSString *systemVersion;
-@property (nonatomic, readonly) NSString *model;
-@property (nonatomic, readonly) NSString *name;
-@end
-
 @interface NSProcessInfo : NSObject
 + (NSProcessInfo *)processInfo;
 @property (nonatomic, readonly) NSString *processName;
@@ -1120,8 +1111,13 @@ FOUNDATION_EXPORT const NSInteger UIControlStateSelected;
 @property (nonatomic, readonly) NSArray *availableModes;
 @end
 
-@interface UIDevice (UIKitAdditions)
+@interface UIDevice : NSObject
++ (UIDevice *)currentDevice;
+@property (nonatomic, readonly) NSString *systemVersion;
+@property (nonatomic, readonly) NSString *model;
+@property (nonatomic, readonly) NSString *name;
 @property (nonatomic, readonly) NSString *systemName;
+@property (nonatomic, readonly) NSUUID *identifierForVendor;
 @property (nonatomic, readonly) NSInteger userInterfaceIdiom;
 @property (nonatomic, readonly) BOOL isMultitaskingSupported;
 @property (nonatomic) BOOL batteryMonitoringEnabled;

@@ -10,6 +10,13 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
 
+// ★ getMachineCode 在 iOS 上要用 UIDevice.identifierForVendor 取设备标识，
+//   所以必须引入 UIKit。原版 T3 示例没写这行（它的 main.m 里有），
+//   我们是 dylib、没有宿主帮忙带进来，必须自己 import。
+#if TARGET_OS_IOS
+#import <UIKit/UIKit.h>
+#endif
+
 // 服务器地址
 static NSString *const T3_ALL_SERVERS_UNAVAILABLE = @"无法连接到所有T3网络验证服务器，可能是因为您的网络问题或T3网络验证服务器被攻击造成的，建议检查网络或稍后重试";
 static NSArray<NSString *> *T3ServerURLs(void) {
