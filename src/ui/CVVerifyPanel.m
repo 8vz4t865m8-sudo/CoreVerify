@@ -167,7 +167,7 @@ static NSString * const kCVPrefEndTime   = @"cv_end_time";
     self.statusLabel.font = [UIFont systemFontOfSize:12.5];
     self.statusLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.numberOfLines = 2;
+    self.statusLabel.numberOfLines = 4;   // 够放「官方话术 + 具体失败原因」
     self.statusLabel.text = @"";
     [self.card addSubview:self.statusLabel];
 

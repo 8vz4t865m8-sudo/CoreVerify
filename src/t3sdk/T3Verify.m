@@ -951,13 +951,35 @@ static NSString *const kStandardCharset = @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij
     if (original.query.length) path = [path stringByAppendingFormat:@"?%@", original.query];
     NSMutableArray<NSString *> *candidates = [NSMutableArray arrayWithObject:_serverUrl];
     for (NSString *base in _serverUrls) if (![base isEqualToString:_serverUrl]) [candidates addObject:base];
+
+    // ★ 诊断增强：逐台记录每台服务器的真实失败原因。
+    //   以前这里把 attemptError 直接丢弃，最终只报一句
+    //   「无法连接到所有T3网络验证服务器」—— 设备端的真实原因
+    //   （证书错误 / 超时 / 断网 / DNS 失败）完全看不到，没法排障。
+    //   实测服务器端全部正常（TLS1.3 / RSA2048 / 证书有效），
+    //   所以设备端的具体错误才是诊断关键。
+    NSString *lastError = nil;
+    NSString *lastHost  = nil;
     for (NSString *base in candidates) {
         NSString *target = [NSString stringWithFormat:@"%@/%@", [base stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]], [path stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]]];
         NSString *attemptError = nil;
         NSString *result = [self httpPostOnce:target body:body error:&attemptError];
         if (result) { _serverUrl = base; return result; }
+        lastError = attemptError;
+        NSURL *u = [NSURL URLWithString:target];
+        lastHost  = u.host ?: base;
+        NSLog(@"[T3Verify] 服务器失败 %@ → %@", target, attemptError ?: @"未知");
     }
-    if (errorMsg) *errorMsg = T3_ALL_SERVERS_UNAVAILABLE;
+    if (errorMsg) {
+        // ★ 具体原因放最前面 —— 官方长话术信息量为零，
+        //   「证书过期 / 断网 / 超时」才是排障关键，UI 第一眼要能看到它
+        if (lastError.length > 0) {
+            *errorMsg = [NSString stringWithFormat:@"%@（%@）—— 服务器 %@",
+                         lastError, lastHost ?: @"?", T3_ALL_SERVERS_UNAVAILABLE];
+        } else {
+            *errorMsg = T3_ALL_SERVERS_UNAVAILABLE;
+        }
+    }
     return nil;
 }
 
