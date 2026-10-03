@@ -112,9 +112,24 @@ jobs:
       - name: ★ constructor 断言
         run: |
           set -e
-          nm -gU CoreVerify.v1.dylib | grep -q "CoreVerifyEntry" \
-            || { echo "❌ 缺 CoreVerifyEntry —— 注入后不会自动启动"; exit 1; }
-          echo "✅ constructor CoreVerifyEntry 已导出"
+          # ★ CoreVerifyEntry 是 `static` 函数 → 局部符号，nm -gU 看不到它。
+          #   所以查 __mod_init_func 段（dyld 真正调用的初始化函数表），
+          #   再用 nm -a（含局部符号）作为交叉验证。
+          SIZE=$(otool -l CoreVerify.v1.dylib \
+                 | awk '/sectname __mod_init_func/{f=1} f&&/size/{print $2; exit}')
+          echo "__mod_init_func size = $SIZE"
+          if [ "$SIZE" = "0x0000000000000000" ] || [ -z "$SIZE" ]; then
+            echo "❌ __mod_init_func 为空 —— constructor 不会执行"
+            exit 1
+          fi
+          echo "✅ constructor 已注册（dyld 加载时会自动调用）"
+
+          if nm -a CoreVerify.v1.dylib | grep -q "CoreVerifyEntry"; then
+            echo "✅ 找到 CoreVerifyEntry（局部符号）"
+          else
+            echo "❌ nm -a 里找不到 CoreVerifyEntry"
+            exit 1
+          fi
 
       - name: ★★★ 反向断言（不能有测试版后门痕迹）
         run: |
