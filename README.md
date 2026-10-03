@@ -2,7 +2,33 @@
 
 给宿主 App 叠一层「全屏卡密验证 + 主页覆盖」的 dylib。
 
-> 产物：`CoreVerify.v1.dylib`（双切片 arm64 + arm64e）
+> 产物：`CoreVerify.v1.dylib`（双切片 arm64 + arm64e，**574,976 字节**）
+>
+> 状态：CI 全绿 ✅ · 仓库 https://github.com/8vz4t865m8-sudo/CoreVerify
+
+**已编译验证的真机产物**实测数据：
+
+```
+$ file CoreVerify.v1.dylib
+Mach-O universal binary with 2 architectures:
+  [arm64]  Mach-O 64-bit arm64  dynamically linked shared library
+  [arm64e] Mach-O 64-bit arm64e (caps: PAC00) dynamically linked shared library
+
+install name = @executable_path/CoreVerify.v1.dylib
+frameworks   = Foundation / UIKit / Security
+constructor  = CoreVerifyEntry（局部符号，nm -a 可见）
+```
+
+后门排查（新产物 vs 测试版 dylib）：
+
+| 字符串 | 测试版 | 新产物 |
+|---|---|---|
+| `2099-12-31` | 1 | **0** |
+| `t.me/cheatrev` | 1 | **0** |
+| `CoreHomeLinkTarget` | 10 | **0** |
+| `CoreHomeRewriteControls` | 2 | **0** |
+| `1970-01-01 00:00:01` | 1 | **0** |
+| `openCommunity` | 2 | **0** |
 
 ---
 
@@ -261,6 +287,58 @@ make verify
 [覆盖层] 已挂载 window=... scale=1.000 topOffset=0.0
 [心跳] 已启动，间隔 60s，连续失败 5 次处理
 ```
+
+---
+
+## 踩过的坑（真实错误，不是为了凑数）
+
+这几个都是 CI 或交叉核对里真抓出来的，留档以免重犯。
+
+### 1. APPKEY 抄错了
+
+源码里一度写成 `...d7fc6d...`，测试版 dylib 里逐字节核对（偏移 `0x23f8b`）
+才知道正确值是 `...d7dfc6d...`。
+
+T3 的调用码是一串十六进制，人工抄写极易看错 —— 所以 preflight 里加了
+**D 组**，拿测试版 dylib 当权威源做逐字节比对。
+
+### 2. `TARGET_OS_IOS` 在 stub 里没定义
+
+`T3Verify.m` 用 `#if TARGET_OS_IOS` 分支，stub 没定义这个宏 → 预处理器当 `0`
+→ 编译时走了 macOS 的 IOKit 分支 → GitHub runner 上 6 个报错。
+
+同一份代码本地却通过（clang 版本不同），属于典型「本地过了 CI 挂」。
+已在 stub 的 `Foundation.h` 里补全 `TargetConditionals` 那一组宏。
+
+### 3. `T3Verify.m` 用了 `UIDevice` 却没 import UIKit
+
+真机报 `error: use of undeclared identifier 'UIDevice'`（第 1262 行）。
+原版 T3 示例没事是因为它的 `main.m` 顺手 import 了 UIKit，我们是 dylib 没这个便利。
+
+更隐蔽的是：**这个错误本地语法检查根本没报**，因为我把 `UIDevice` 放进了
+Foundation stub —— 而真实 SDK 里它属于 UIKit。
+stub 放错位置会掩盖「忘了 import」这类错误，已挪回 UIKit stub。
+
+### 4. postflight 自己的 bug：`nm -gU` 找不到 constructor
+
+`CoreVerifyEntry` 是 `static` → **局部符号**，而 `nm -gU` 只看全局符号。
+所以永远找不到。改为读 `__mod_init_func` 段（dyld 真正调用的那张表）+ `nm -a`。
+
+### 5. fat 二进制上直接 `strings` 会漏内容
+
+产物是双切片 fat。直接对它跑 `strings` 漏掉了 `__cstring` 里的 APPKEY，
+导致误报「APPKEY 缺失」。改为先 `lipo -thin` 拆切片再查。
+
+★ 这一条在**CI 的安全断言**里尤其致命 —— 那一步是查后门残留的，
+漏检等于后门溜过去。已修。
+
+### 6. `ok/warn/bad` 写成单参数调用
+
+这仨函数签名是 `(tag, msg)`，我有 10 处漏写了 tag。
+本地走不到那些分支（没 lipo/otool），完全没暴露；上 CI 直接 `TypeError`。
+
+为此加了 **H0 检查**：用 AST 扫描 postflight.py 里所有调用的参数个数。
+已验证注入一处单参数调用会被当场抓出来。
 
 ---
 
