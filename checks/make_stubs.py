@@ -99,6 +99,22 @@ FILES["Foundation/Foundation.h"] = r'''
 #include "CVGeom.h"
 #include "dispatch/dispatch.h"
 
+/* ★ TargetConditionals —— 决定源码走 iOS 分支还是 macOS 分支。
+   真实 iOS SDK 里由 <TargetConditionals.h> 提供。
+   这里必须显式定义，否则 #if TARGET_OS_IOS 会当 0，
+   让 T3Verify.m 走进 IOKit 分支，在 Linux 上编译不过。 */
+#define TARGET_OS_IOS     1
+#define TARGET_OS_IPHONE  1
+#define TARGET_OS_MAC     0
+#define TARGET_OS_OSX     0
+#define TARGET_OS_SIMULATOR 0
+#define TARGET_OS_EMBEDDED 1
+#define TARGET_OS_TV      0
+#define TARGET_OS_WATCH   0
+#define TARGET_OS_MACCATALYST 0
+#define TARGET_CPU_ARM64  1
+#define TARGET_CPU_ARM64E 1
+
 #define NS_ASSUME_NONNULL_BEGIN
 #define NS_ASSUME_NONNULL_END
 #define NS_FORMAT_FUNCTION(a,b)
@@ -336,6 +352,13 @@ FOUNDATION_EXPORT const NSRange NSRangeZero;
 + (NSNumber *)numberWithBool:(BOOL)b;
 + (NSNumber *)numberWithDouble:(double)d;
 + (NSNumber *)numberWithLongLong:(long long)v;
++ (NSNumber *)numberWithUnsignedLong:(unsigned long)v;
++ (NSNumber *)numberWithUnsignedLongLong:(unsigned long long)v;
++ (NSNumber *)numberWithChar:(char)v;
++ (NSNumber *)numberWithShort:(short)v;
++ (NSNumber *)numberWithUnsignedShort:(unsigned short)v;
++ (NSNumber *)numberWithFloat:(float)v;
++ (NSNumber *)numberWithLong:(long)v;
 - (int)intValue;
 - (NSInteger)integerValue;
 - (unsigned)unsignedIntValue;
