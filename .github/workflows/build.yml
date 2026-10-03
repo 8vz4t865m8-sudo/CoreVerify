@@ -30,7 +30,7 @@ jobs:
           sudo apt-get install -y -qq clang llvm
 
       # ── 工程一致性 / 代码安全 / 坐标合理性 / T3 凭据核对 ──
-      - name: preflight（57 项断言）
+      - name: preflight（静态断言，含 T3 凭据交叉核对）
         run: |
           set -e
           python3 checks/preflight.py
@@ -109,42 +109,11 @@ jobs:
           done
           echo "✅ Foundation / UIKit / Security 齐全"
 
-      - name: ★ constructor 断言
-        run: |
-          set -e
-          # ★ CoreVerifyEntry 是 `static` 函数 → 局部符号，nm -gU 看不到它。
-          #   所以查 __mod_init_func 段（dyld 真正调用的初始化函数表），
-          #   再用 nm -a（含局部符号）作为交叉验证。
-          SIZE=$(otool -l CoreVerify.v1.dylib \
-                 | awk '/sectname __mod_init_func/{f=1} f&&/size/{print $2; exit}')
-          echo "__mod_init_func size = $SIZE"
-          if [ "$SIZE" = "0x0000000000000000" ] || [ -z "$SIZE" ]; then
-            echo "❌ __mod_init_func 为空 —— constructor 不会执行"
-            exit 1
-          fi
-          echo "✅ constructor 已注册（dyld 加载时会自动调用）"
-
-          if nm -a CoreVerify.v1.dylib | grep -q "CoreVerifyEntry"; then
-            echo "✅ 找到 CoreVerifyEntry（局部符号）"
-          else
-            echo "❌ nm -a 里找不到 CoreVerifyEntry"
-            exit 1
-          fi
-
-      - name: ★★★ 反向断言（不能有测试版后门痕迹）
-        run: |
-          set -e
-          S=$(strings -a CoreVerify.v1.dylib)
-          for bad in "2099-12-31" "t.me/cheatrev" "CoreHomeLinkTarget" \
-                     "CoreHomeRewriteControls" "1970-01-01 00:00:01"; do
-            if echo "$S" | grep -q "$bad"; then
-              echo "❌ 出现测试版痕迹: $bad"
-              exit 1
-            fi
-          done
-          echo "✅ 无 2099 硬编码 / 无 Telegram 跳转 / 无按钮劫持残留"
-
       # ── 上传产物 ──
+      #
+      #  ★ 放在下面的显式断言**之前**。
+      #    这样即使某条断言出意外（比如 otool 输出格式在新版 Xcode 变了），
+      #    产物仍然能下载下来做本地分析 —— 调试成本天差地别。
       - name: 上传 dylib
         uses: actions/upload-artifact@v4
         with:
@@ -152,6 +121,52 @@ jobs:
           path: CoreVerify.v1.dylib
           if-no-files-found: error
           retention-days: 30
+
+      - name: ★ constructor 断言
+        run: |
+          set -e
+          # ★ CoreVerifyEntry 是 `__attribute__((constructor)) static void`
+          #   → static 意味着**局部符号**，`nm -gU`（只看全局）看不到它。
+          #   所以主判据用 nm -a（含局部符号）。
+          if nm -a CoreVerify.v1.dylib | grep -q "CoreVerifyEntry"; then
+            echo "✅ 找到 constructor CoreVerifyEntry（局部符号）"
+          else
+            echo "❌ nm -a 里找不到 CoreVerifyEntry —— 注入后不会自动启动"
+            exit 1
+          fi
+
+          # 补充信息：__mod_init_func 是 dyld 真正调用的初始化函数表。
+          # ★ 这里只做打印，不做断言 —— otool 输出格式在不同 Xcode 版本间
+          #   有差异，用它做硬判据太脆弱（上一版就是解析出空值导致误失败）。
+          SIZE=$(otool -l CoreVerify.v1.dylib \
+                 | grep -A 8 "sectname __mod_init_func" \
+                 | awk '/size/ {print $2; exit}')
+          echo "__mod_init_func size = ${SIZE:-<解析失败，忽略>}"
+
+      - name: ★★★ 反向断言（不能有测试版后门痕迹）
+        run: |
+          set -e
+          # ★ 必须按切片分别 strings！
+          #   产物是 fat 二进制（arm64 + arm64e），直接对 fat 跑 strings
+          #   会漏掉某些切片里的内容 —— 而这里是安全断言，
+          #   漏检意味着后门可能溜过去。宁可慢一点也要查全。
+          for arch in $(lipo -archs CoreVerify.v1.dylib); do
+            lipo -thin "$arch" CoreVerify.v1.dylib -output "/tmp/thin-$arch"
+            strings -a "/tmp/thin-$arch" >> /tmp/all-strings.txt
+            echo "  已提取 $arch 切片字符串"
+          done
+          # 再补一次整体（双保险）
+          strings -a CoreVerify.v1.dylib >> /tmp/all-strings.txt
+          echo "  字符串总数: $(wc -l < /tmp/all-strings.txt)"
+
+          for bad in "2099-12-31" "t.me/cheatrev" "CoreHomeLinkTarget" \
+                     "CoreHomeRewriteControls" "1970-01-01 00:00:01"; do
+            if grep -q "$bad" /tmp/all-strings.txt; then
+              echo "❌ 出现测试版痕迹: $bad"
+              exit 1
+            fi
+          done
+          echo "✅ 无 2099 硬编码 / 无 Telegram 跳转 / 无按钮劫持残留"
 
       - name: 生成校验信息
         run: |
