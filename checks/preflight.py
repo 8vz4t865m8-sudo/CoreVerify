@@ -13,6 +13,7 @@ CoreVerify 编译前静态检查
 返回： 0 = 全过；1 = 有 FAIL
 """
 
+import ast
 import os
 import re
 import sys
@@ -567,6 +568,33 @@ else:
             ok("D2 %s 与 %s 一致且已在该 dylib 中验证（%s）" % (desc, var, enc))
         else:
             bad("D2 %s 在测试版 dylib 中找不到该值 —— 可能抄错" % desc)
+
+
+# H0 ★ postflight.py 自身的健壮性
+#
+#  历史教训：曾经因为把 ok/warn/bad 写成单参数调用，
+#  postflight 在 CI 上抛 TypeError，而本地（无 lipo/otool 分支）走不到那行，
+#  完全没暴露。所以这里用 AST 静态扫描所有调用的参数个数。
+_pf = read("checks/postflight.py") or ""
+if _pf:
+    try:
+        arity_bad = [
+            (n.lineno, n.func.id, len(n.args) + len(n.keywords))
+            for n in ast.walk(ast.parse(_pf))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in ("ok", "warn", "bad")
+            and len(n.args) + len(n.keywords) != 2
+        ]
+        if arity_bad:
+            for ln, fn, cnt in arity_bad:
+                bad("H0 postflight 行 %d: %s() 传了 %d 个参数（应为 2）"
+                    % (ln, fn, cnt))
+        else:
+            ok("H0 postflight 的 ok/warn/bad 调用参数个数全部正确")
+    except SyntaxError as e:
+        bad("H0 postflight.py 语法错误: %s" % e)
+else:
+    warn("H0 找不到 postflight.py")
 
 
 # ══════════════════════════════════════════════════════════════════════════

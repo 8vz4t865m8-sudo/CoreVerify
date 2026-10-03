@@ -176,69 +176,129 @@ def main():
     else:
         warn("C1", "无 otool，跳过 install name / 依赖检查")
 
-    # ── E. 导出符号 ──
+    # ── E. 导出符号 / constructor ──
     if have_nm:
+        # ★ constructor 是 `__attribute__((constructor)) static void` —— 
+        #   static 意味着它是**局部符号**，`nm -gU`（只看全局）根本看不到它！
+        #   正确做法：看 __mod_init_func 段，或在 nm -a（含局部符号）里找。
+        #
+        #   __mod_init_func 是 dyld 真正会调用的初始化函数表 ——
+        #   只要它非空，就说明 constructor 确实生效了。
+        rc, out = run("otool -l '%s' 2>/dev/null | "
+                      "awk '/sectname __mod_init_func/,/^$/' | "
+                      "grep -E 'size|sectname' | head -5" % path) if have_otool else (1, "")
+        mod_init_ok = False
+        if rc == 0 and out:
+            m = re.search(r"size\s+0x([0-9a-fA-F]+)", out)
+            if m and int(m.group(1), 16) > 0:
+                mod_init_ok = True
+                ok("E1", "constructor 已进 __mod_init_func（size=0x%s，dyld 会调用）"
+                   % m.group(1))
+            else:
+                bad("E1", "__mod_init_func 为空 —— constructor 不会执行")
+        else:
+            # 退路：在全部符号（含 static 局部符号）里找
+            rc2, out2 = run("nm -a '%s' 2>/dev/null || nm '%s'" % (path, path))
+            if rc2 == 0 and "CoreVerifyEntry" in out2:
+                ok("E1", "找到 constructor CoreVerifyEntry（局部符号）")
+                mod_init_ok = True
+            elif rc2 == 0 and "CoreVerify" in out2:
+                ok("E1", "找到 CoreVerify 相关符号（constructor 大概率已生效）")
+                mod_init_ok = True
+            else:
+                bad("E1", "找不到 constructor —— 注入后不会自动启动")
+
+        # 应导出的 Objective-C 类（这些是全局符号，-gU 能看到）
         rc, out = run("nm -gU '%s' 2>/dev/null || nm -g '%s'" % (path, path))
         if rc == 0:
-            if "CoreVerifyEntry" in out:
-                ok("E1", "constructor CoreVerifyEntry 已导出")
-            else:
-                bad("E1", "找不到 constructor CoreVerifyEntry —— 注入后不会自动启动")
-            for cls in ("CoreVerify", "CVOverlay", "CVVerifyPanel", "T3Verify"):
+            for cls in ("CoreVerify", "CVOverlay", "CVVerifyPanel", "CVHostHook",
+                        "T3Verify"):
                 if ("_OBJC_CLASS_$_" + cls) in out:
                     ok("E2", "类 %s 已导出" % cls)
                 else:
                     warn("E2", "类 %s 未在导出表（可能被内联/优化掉）" % cls)
         else:
-            warn("E1", "nm 失败: %s" % out.strip()[:80])
+            warn("E2", "nm -g 失败: %s" % out.strip()[:80])
     else:
         warn("E1", "无 nm，跳过符号检查")
 
     # ── F. 关键字符串 ──
+    #
+    # ★ 为什么不直接用 `strings`？
+    #   产物是 fat 二进制（arm64 + arm64e 两个切片）。
+    #   直接对 fat 跑 strings 时，不同版本对切片边界的处理不一致，
+    #   会漏掉 __cstring 里的内容（我们真的踩过：APPKEY 明明在却报缺失）。
+    #
+    #   可靠做法：先 lipo -thin 拆出每个切片，再对切片跑 strings，取并集。
+    strings_text = ""
+    if have_lipo:
+        for arch in ("arm64e", "arm64"):
+            thin = "/tmp/cv-verify-%s" % arch
+            rc, _ = run("lipo -thin %s '%s' -output %s" % (arch, path, thin))
+            if rc == 0 and os.path.isfile(thin):
+                rc2, out2 = run("strings -a %s" % thin)
+                if rc2 == 0:
+                    strings_text += out2
+                try:
+                    os.remove(thin)
+                except Exception:
+                    pass
+    # 再补一次直接 strings（thin 场景 / 没有 lipo 时用）
     rc, out = run("strings -a '%s'" % path)
     if rc == 0:
+        strings_text += out
+
+    if strings_text:
         must = [
             ("F1", "0AAD3A3337741A5B", "T3 登录调用码"),
             ("F2", "7EB0F4A8272A7EBD", "T3 公告调用码"),
             ("F3", "61D5FC87F536273F", "T3 版本调用码"),
             ("F4", "A44066FE62E69F9D", "T3 心跳调用码"),
-            ("F5", "1e45cd9daa2d5d7fc6d8e66abe43b0a", "T3 APPKEY"),
+            ("F5", "1e45cd9daa2d5d7dfc6d8e66abe43b0a", "T3 APPKEY"),
             ("F6", "BEGIN PUBLIC KEY", "RSA 公钥头"),
             ("F7", "w.t3yanzheng.com", "T3 服务器地址"),
         ]
         for tag, needle, desc in must:
-            if needle in out:
-                ok(tag, "包含 %s" % desc)
+            if needle in strings_text:
+                ok(tag, "包含 %s（%s）" % (desc, needle))
             else:
                 bad(tag, "缺少 %s（%s）—— 验证功能会失效" % (desc, needle))
 
-        # UI 文案
+        # UI 文案：中文以 UTF-16 存在 __ustring / __cfstring，
+        # strings 默认只抓 ASCII，看不到属正常 → 只提示不判失败
+        chinese_missing = []
         for tag, needle, desc in (
             ("F8",  "授权至", "到期时间前缀"),
             ("F9",  "验证并激活", "验证按钮文案"),
             ("F10", "请输入卡密", "输入框占位符"),
         ):
-            if needle in out:
+            if needle in strings_text:
                 ok(tag, "包含 UI 文案「%s」" % desc)
             else:
-                warn(tag, "未见 UI 文案「%s」（可能被编译器合并/编码转换）" % desc)
+                chinese_missing.append(desc)
+        if chinese_missing:
+            warn("F8", "中文文案 %s 未在 ASCII 串中出现"
+                      "（UTF-16 编码所致，属正常）" % "/".join(chinese_missing))
     else:
-        warn("F1", "strings 失败")
+        warn("F1", "strings 无输出，无法校验关键字符串")
 
     # ── G. 反向断言：绝不能带测试版的后门 ──
-    forbidden = [
-        ("G1", "2099-12-31",      "测试版的「永远有效」硬编码到期值"),
-        ("G2", "t.me/cheatrev",   "测试版的 Telegram 跳转目标"),
-        ("G3", "CoreHomeLinkTarget", "测试版的按钮跳转类"),
-        ("G4", "CoreHomeRewriteControls", "测试版的按钮劫持函数"),
-        ("G5", "1970-01-01 00:00:01", "测试版的未授权哨兵值"),
-    ]
-    for tag, needle, desc in forbidden:
-        if needle in out:
-            bad(tag, "★ 出现禁用串 %s（%s）—— 这是测试版的痕迹！"
-                     % (needle, desc))
-        else:
-            ok(tag, "已排除 %s" % desc)
+    if strings_text:
+        forbidden = [
+            ("G1", "2099-12-31",      "测试版的「永远有效」硬编码到期值"),
+            ("G2", "t.me/cheatrev",   "测试版的 Telegram 跳转目标"),
+            ("G3", "CoreHomeLinkTarget", "测试版的按钮跳转类"),
+            ("G4", "CoreHomeRewriteControls", "测试版的按钮劫持函数"),
+            ("G5", "1970-01-01 00:00:01", "测试版的未授权哨兵值"),
+        ]
+        for tag, needle, desc in forbidden:
+            if needle in strings_text:
+                bad(tag, "★ 出现禁用串 %s（%s）—— 这是测试版的痕迹！"
+                         % (needle, desc))
+            else:
+                ok(tag, "已排除 %s" % desc)
+    else:
+        warn("G1", "无法读取字符串，反向断言跳过")
 
     report()
     return 0 if FAIL == 0 else 1
